@@ -208,6 +208,7 @@ def face_mask_data_proc():
     for it in tmp_img_list:
         if(it.endswith('jpg')):
             img_list.append(it)
+    random.shuffle(img_list)
     for it in tqdm(img_list):
         label_name = it[0:it.rfind('.')] + ".txt"
         img_name = os.path.join(path, it)
@@ -226,11 +227,16 @@ def face_mask_data_proc():
         labels = []
         labels_text = []
         for obj in (objs):
-            label, xmin, ymin, w, h = obj.split(' ')
-            xmin = float(xmin)
-            ymin = float(ymin)
-            ymax = ymin + float(h)
-            xmax = xmin + float(w)
+            label, xmid, ymid, w, h = obj.split(' ')
+            w = float(w) / 2
+            h = float(h) / 2
+            xmid = float(xmid)
+            ymid = float(ymid)
+
+            xmin = xmid - w
+            xmax = xmid + w
+            ymin = ymid - h
+            ymax = ymid + h
             # print([label, xmin, ymin, xmax, ymax])
             xmins.append((xmin))
             ymins.append((ymin))
@@ -307,7 +313,7 @@ IMAGE_FEATURE_MAP = {
     'image/object/bbox/xmax': tf.io.VarLenFeature(tf.float32),
     'image/object/bbox/ymax': tf.io.VarLenFeature(tf.float32),
     'image/object/class/text': tf.io.VarLenFeature(tf.string),
-    # 'image/object/class/label': tf.io.VarLenFeature(tf.int64),
+    # 'image/object/class/label': tf.io.FixedLenFeature([], tf.int64),
     # 'image/object/difficult': tf.io.VarLenFeature(tf.int64),
     # 'image/object/truncated': tf.io.VarLenFeature(tf.int64),
     # 'image/object/view': tf.io.VarLenFeature(tf.string),
@@ -340,8 +346,8 @@ yolo_anchor_masks = np.array([[6, 7, 8], [3, 4, 5], [0, 1, 2]])
 
 YOLO_MAX_BOXES = 20
 YOLO_IMG_SIZE = 128
-yolo_epoch = 1
-yolo_batch_size = 1
+yolo_epoch = 10
+yolo_batch_size = 4
 
 def get_tfrecord_iterator(tfrecord_file_path, shuffle=True, epoch=yolo_epoch, batch_size=yolo_batch_size):
     def _parse_example_(example):
@@ -356,6 +362,7 @@ def get_tfrecord_iterator(tfrecord_file_path, shuffle=True, epoch=yolo_epoch, ba
             'image/object/bbox/ymax': tf.io.VarLenFeature(tf.float32),
             'image/object/class/text': tf.io.VarLenFeature(tf.string),
             'image/object/class/label': tf.io.VarLenFeature(tf.float32),
+            # 'image/object/class/label': tf.io.FixedLenFeature([], tf.int64),
         })
         w = features['image/weight'][0]
         h = features['image/height'][0]
@@ -380,6 +387,10 @@ def get_tfrecord_iterator(tfrecord_file_path, shuffle=True, epoch=yolo_epoch, ba
         '''
         img = tf.io.decode_raw(img_raw, tf.uint8)       # 解析图片
         img = tf.compat.v1.reshape(img, (w, h, 3))
+        # label_txt = features['image/object/class/text']
+        # txts = ['mask', 'nomask']
+        # labels = [txts.index[x] for x in label_txt]
+        # labels = tf.cast(features['image/object/class/label'], tf.int32)
         labels = features['image/object/class/label']
         xmins = features['image/object/bbox/xmin']
         ymins = features['image/object/bbox/ymin']
@@ -389,8 +400,8 @@ def get_tfrecord_iterator(tfrecord_file_path, shuffle=True, epoch=yolo_epoch, ba
                           tf.sparse.to_dense(ymins),        # [batch, ymin]
                           tf.sparse.to_dense(xmaxs),        # [batch, xmax]         ---->      [batch, (xmin, ymin, xmax, ymax, label)]
                           tf.sparse.to_dense(ymaxs),        # [batch, ymax]
-                          tf.sparse.to_dense(labels)]       # [batch, label]
-                         , axis=1) 
+                          tf.sparse.to_dense(labels)       # [batch, label]
+                         ], axis=1) 
         
         # 规整形状为一致
         pad_len = YOLO_MAX_BOXES - tf.shape(boxs)[0]
@@ -402,10 +413,14 @@ def get_tfrecord_iterator(tfrecord_file_path, shuffle=True, epoch=yolo_epoch, ba
         img = tf.image.resize(img, (img_size, img_size))
         img = img / 255.0
         return img
+# tensorflow.python.framework.errors_impl.InvalidArgumentError: indices[2] = [4, 2, 1] does not index into shape [4,4,3,6]
+#          [[{{node TensorScatterUpdate}}]]
+#          [[IteratorGetNext]]
 
     
     # 每次处理一张图片的数据
     def transform_label(label):     # [[[0.065  0.70139396  0.186  1.0051358  1.  5.], [0.42225  0.06382979  0.46275  0.1298606  0.  1.], ... ]]]
+
 
         def pre_trans_label(label, grid_size, anchor_idxs):
             # [grid_size, grid_size, anchors_size, (xmin, ymin, xmax, ymax, obj, anchor_idx)]
@@ -428,16 +443,17 @@ def get_tfrecord_iterator(tfrecord_file_path, shuffle=True, epoch=yolo_epoch, ba
                 if not tf.reduce_any(anchor_equ):       # 不在这一批次
                     continue
 
-                box = label[:, 0:4]
-                center_xy = (box[j][0:2] + box[j][2:4]) / 2     # 中心点xy
+                box = label[j][0:4]
+                center_xy = (box[0:2] + box[2:4]) / 2     # 中心点xy
                 grid_xy = tf.cast(center_xy // (1./grid_size), tf.int32)                # 在哪个grid中
                 anchor_idx = tf.cast(tf.where(anchor_equ), tf.int32)                    # [0, 1, 4, 0, 0] -->  [0,1],[0,2]  哪个坐标的数值为非零（可以看最合适的框是否在这一批次中）
 
                 indexes = indexes.write(idx, [grid_xy[1], grid_xy[0], anchor_idx[0][0]])                        # 替换的坐标[第几行的grid中， 第几列的grid中， 用的第几个bound_box]
-                updates = updates.write(idx, [box[j][0], box[j][1], box[j][2], box[j][3], 1, label[j][4]])      # 替换的内容[xmin, ymin, xmax, ymax, 1, label]
+                updates = updates.write(idx, [box[0], box[1], box[2], box[3], 1, label[j][4]])      # 替换的内容[xmin, ymin, xmax, ymax, 1, label]
                 idx += 1
             # tf.tensor_scatter_nd_update:(稀疏矩阵表示形式)，将y_true_out的indexes位置的点用updates的内容替换
             # [grid_size, grid_size, anchors_size, (xmin, ymin, xmax, ymax, obj, anchor_idx)]
+            # return y_true_out
             return tf.tensor_scatter_nd_update(y_true_out, indexes.stack(), updates.stack())
 
 
@@ -470,11 +486,12 @@ def get_tfrecord_iterator(tfrecord_file_path, shuffle=True, epoch=yolo_epoch, ba
     dataset = dataset.map(lambda x, y:(
         transform_image(x),
         transform_label(y)
+        # y   # 有大于1的数字，是x1,y1,x2,y2(有问题)还是x,y,w,h(可以理解)
     ))
     dataset = dataset.shuffle(shuffle).repeat(epoch).batch(batch_size)
 
-    # train_iterator = dataset.make_one_shot_iterator()
-    # return train_iterator
+    train_iterator = dataset.make_one_shot_iterator()
+    return train_iterator
     return dataset
 
 def face_mask_test_3(tfrecord_path="C:/Users/LJ/Desktop/tensorflow_code/yolo-v5/yolo-v3/yolov3-tf2/data/voc2012_val.tfrecord"):
@@ -483,13 +500,13 @@ def face_mask_test_3(tfrecord_path="C:/Users/LJ/Desktop/tensorflow_code/yolo-v5/
         sess.run(tf.compat.v1.global_variables_initializer())
         train_batch = train_iterator.get_next()
 
-        for i in range(1000):
+        for i in tqdm(range(1000)):
             train_x, train_y = sess.run(train_batch)
 
-            print(train_y)
-            plt.imshow(train_x[0])
+            # print(train_y)
+            # plt.imshow(train_x[0])
             # plt.show()
-            input()
+            # input()
 
 
 
@@ -505,5 +522,5 @@ if __name__ == '__main__':
     # get_max_boxes()
     # face_mask_data_proc()
     # face_mask_read_data()
-    face_mask_test_3("D:/IDM/yolo/face_mask/dataset/images/train/data/face_mask.tfrecords")
+    face_mask_test_3("D:/IDM/yolo/face_mask/dataset/images/train/data/face_mask.tfrecords")      # 
     pass

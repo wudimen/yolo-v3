@@ -287,6 +287,23 @@ def YoloV3Tiny(size=None, channels=3, anchors=yolo_tiny_anchors,
                      name='yolo_nms')((boxes_0[:3], boxes_1[:3]))
     return Model(inputs, outputs, name='yolov3_tiny')
 
+def caculate_iou(y_true, y_pred):
+    y_true = tf.expand_dims(y_true, axis=-2)
+    y_pred = tf.expand_dims(y_pred, axis=0)
+
+    new_shape = tf.broadcast_dynamic_shape(tf.shape(y_true), tf.shape(y_pred))
+    y_true = tf.broadcast_to(y_true, new_shape)
+    y_pred = tf.broadcast_to(y_pred, new_shape)
+
+    interuct_w = tf.maximum(tf.minimum(y_true[..., 2], y_pred[..., 2]) - tf.maximum(y_true[..., 0], y_pred[..., 0]), 0)
+    interuct_h = tf.maximum(tf.minimum(y_true[..., 3], y_pred[..., 3]) - tf.maximum(y_true[..., 1], y_pred[..., 1]), 0)
+    interuct_ares = interuct_w * interuct_h
+
+    true_area = (y_true[..., 2] - y_true[..., 0]) * (y_true[..., 3] - y_true[..., 1])
+    pred_area = (y_pred[..., 2] - y_pred[..., 0]) * (y_pred[..., 3] - y_pred[..., 1])
+
+    iou = interuct_ares / (true_area + pred_area - interuct_ares)
+    return iou
 
 def YoloLoss(anchors, classes=80, ignore_thresh=0.5):
     def yolo_loss(y_true, y_pred):
@@ -318,10 +335,29 @@ def YoloLoss(anchors, classes=80, ignore_thresh=0.5):
                            tf.zeros_like(true_wh), true_wh)
 
         # 4. calculate all masks
+        # obj_mask = tf.squeeze(true_obj, -1)
+        # # ignore false positive when iou is over threshold
+        # true_mask = tf.cast(obj_mask, tf.bool)
+        # cal_true = tf.boolean_mask(true_box, true_mask)
+        # best_iou = tf.map_fn(lambda x:tf.reduce_max(broadcast_iou(x[0], x[1]), axis=-1), (pred_box, cal_true), tf.float32)
+        # ignore_mask = tf.cast(best_iou < ignore_thresh, tf.float32)
+
+        # # 计算各个loss值
+        # xy_loss = obj_mask * box_loss_scale * tf.reduce_sum(tf.square(true_xy-pred_xy), axis=-1)
+        # wh_loss = obj_mask * box_loss_scale * tf.reduce_sum(tf.square(true_wh-pred_wh), axis=-1)
+        # obj_loss = tf.losses.binary_crossentropy(true_obj, pred_obj)
+        # obj_loss = obj_mask * obj_loss + (1-obj_mask) * ignore_mask * obj_loss
+        # class_loss = obj_mask * tf.losses.sparse_categorical_crossentropy(true_class_idx, pred_class)       # TODO 使用binary_crossentropy
+
+        # # 求和全部loss值
+        # xy_loss = tf.reduce_sum(xy_loss, axis=(1,2,3))
+        # wh_loss = tf.reduce_sum(wh_loss, axis=(1,2,3))
+        # obj_loss = tf.reduce_sum(obj_loss, axis=(1,2,3))
+        # class_loss = tf.reduce_sum(class_loss, axis=(1,2,3))
+
         obj_mask = tf.squeeze(true_obj, -1)
-        # ignore false positive when iou is over threshold
         best_iou = tf.map_fn(
-            lambda x: tf.reduce_max(broadcast_iou(x[0], tf.boolean_mask(
+            lambda x: tf.reduce_max(caculate_iou(x[0], tf.boolean_mask(
                 x[1], tf.cast(x[2], tf.bool))), axis=-1),
             (pred_box, true_box, obj_mask),
             tf.float32)
@@ -344,6 +380,31 @@ def YoloLoss(anchors, classes=80, ignore_thresh=0.5):
         wh_loss = tf.reduce_sum(wh_loss, axis=(1, 2, 3))
         obj_loss = tf.reduce_sum(obj_loss, axis=(1, 2, 3))
         class_loss = tf.reduce_sum(class_loss, axis=(1, 2, 3))
+
+        # best_iou = tf.map_fn(
+        #     lambda x: tf.reduce_max(broadcast_iou(x[0], tf.boolean_mask(
+        #         x[1], tf.cast(x[2], tf.bool))), axis=-1),
+        #     (pred_box, true_box, obj_mask),
+        #     tf.float32)
+        # ignore_mask = tf.cast(best_iou < ignore_thresh, tf.float32)
+
+        # # 5. calculate all losses
+        # xy_loss = obj_mask * box_loss_scale * \
+        #     tf.reduce_sum(tf.square(true_xy - pred_xy), axis=-1)
+        # wh_loss = obj_mask * box_loss_scale * \
+        #     tf.reduce_sum(tf.square(true_wh - pred_wh), axis=-1)
+        # obj_loss = binary_crossentropy(true_obj, pred_obj)
+        # obj_loss = obj_mask * obj_loss + \
+        #     (1 - obj_mask) * ignore_mask * obj_loss
+        # # TODO: use binary_crossentropy instead
+        # class_loss = obj_mask * sparse_categorical_crossentropy(
+        #     true_class_idx, pred_class)
+
+        # # 6. sum over (batch, gridx, gridy, anchors) => (batch, 1)
+        # xy_loss = tf.reduce_sum(xy_loss, axis=(1, 2, 3))
+        # wh_loss = tf.reduce_sum(wh_loss, axis=(1, 2, 3))
+        # obj_loss = tf.reduce_sum(obj_loss, axis=(1, 2, 3))
+        # class_loss = tf.reduce_sum(class_loss, axis=(1, 2, 3))
 
         return xy_loss + wh_loss + obj_loss + class_loss
     return yolo_loss

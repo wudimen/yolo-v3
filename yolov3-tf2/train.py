@@ -173,7 +173,7 @@ def main(_argv):
                 outputs = model(images)
                 regularization_loss = tf.reduce_sum(model.losses)
                 pred_loss = []
-                for output, label, loss_fn in zip(outputs, labels, loss):       # outputs:(output0, output1, output2)   labels
+                for output, label, loss_fn in zip(outputs, labels, loss):       # outputs:(output0, output1, output2)   labels:([batch_size, grid, grid, anchors, (xmin, ymin, xmax, ymax, 1, label)])  loss:loss_fn * 3(针对于不同的grid)
                     pred_loss.append(loss_fn(label, output))
                 total_loss = tf.reduce_sum(pred_loss) + regularization_loss
 

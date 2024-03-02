@@ -220,7 +220,7 @@ def caculate_iou(y_true, y_pred):
     y_true = tf.expand_dims(y_true, axis=-2)
     y_pred = tf.expand_dims(y_pred, axis=0)
 
-    new_shape = tf.broadcast_dynamic_shape(y_true, y_pred)
+    new_shape = tf.broadcast_dynamic_shape(tf.shape(y_true), tf.shape(y_pred))
     y_true = tf.broadcast_to(y_true, new_shape)
     y_pred = tf.broadcast_to(y_pred, new_shape)
 
@@ -254,16 +254,28 @@ def YoloLoss(anchors, classes, ignore_thresh=0.5):
 
         # 调整true_xy, true_wh的格式，使之与pred对应
         grid_size = tf.shape(y_true)[1]
-        grid = tf.meshgrid(tf.range(grid_size), tf.shape(grid_size))
+        grid = tf.meshgrid(tf.range(grid_size), tf.range(grid_size))
         grid = tf.expand_dims(tf.stack(grid, axis=-1), axis=2)
         true_xy = true_xy * tf.cast(grid_size, tf.float32) - tf.cast(grid, tf.float32)      # 从相对一张图片的位置变成相对对应格子的相对位置
         true_wh = tf.math.log(true_wh / anchors)        # 之前为了更好传递true_wh的误差，e ^ wh， 此时恢复过来
         true_wh = tf.where(tf.math.is_inf(true_wh), tf.zeros_like(true_wh), true_wh)        # 经过tf.math.log，结果可能为inf，这里将inf变成0，防止后续计算loss值时'loss爆炸'
 
+
         # 是否有真实物体（只计算真实物体的box_loss与class_loss）
-        obj_mask = tf.squeeze(true_obj, axis=-1)
-        best_iou = tf.map_fn(lambda x:tf.reduce_max(caculate_iou(x[0], tf.boolean_mask(x[1], tf.cast(x[2], tf.bool))), axis=-1)(pred_box, true_box, obj_mask), tf.float32)
+        obj_mask = tf.squeeze(true_obj, -1)
+        # best_iou = tf.map_fn(
+        #     lambda x: tf.reduce_max(caculate_iou(x[0], tf.boolean_mask(
+        #         x[1], tf.cast(x[2], tf.bool))), axis=-1),
+        #     (pred_box, true_box, obj_mask),
+        #     tf.float32)
+
+        # true_mask = tf.cast(obj_mask, tf.bool)
+        # cal_true = tf.boolean_mask(true_box, true_mask)
+        # best_iou = tf.map_fn(lambda x:tf.reduce_max(caculate_iou(x[0], x[1]), axis=-1), (pred_box, cal_true), tf.float32)
+        # ignore_mask = tf.cast(best_iou < ignore_thresh, tf.float32)
+        best_iou = tf.map_fn(lambda x:tf.reduce_max(caculate_iou(x[0],  tf.boolean_mask(x[1], tf.cast(x[2], tf.bool))), axis=-1), (pred_box, true_box, obj_mask), tf.float32)
         ignore_mask = tf.cast(best_iou < ignore_thresh, tf.float32)
+
 
         # 计算各个loss值
         xy_loss = obj_mask * score_boxes * tf.reduce_sum(tf.square(true_xy-pred_xy), axis=-1)
@@ -283,6 +295,6 @@ def YoloLoss(anchors, classes, ignore_thresh=0.5):
     return yolo_loss
 
 if __name__ == '__main__':
-    model = YoloV3(size=128, train=False)
+    model = YoloV3(size=128, train=True)
     # model = DarkNet(name='darknet')
     model.summary()
