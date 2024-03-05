@@ -18,6 +18,8 @@ YOLO_MAX_BOXES = 30
 YOLO_IOU_THRESHOLD = 0.5
 YOLO_SCORE_THRESHOld = 0.5
 
+num_classes = 80
+
 # DarkNet卷积层
 def DarkNetConv(x, filters, size, strides=1, Batchnorm=True):
     if strides==1:
@@ -100,7 +102,7 @@ def _meshgrid(m_a, m_b):        # (3, 2)    -->     [ [[0,1,2],[0,1,2]], [[0,0,0
 
 # 将相对于对应格子相对坐标的box 转换成 相对于整张图片的相对坐标的box ， 处理并取出obj,classes
 def yolo_pred_to_boxes(pred, anchors, classes):     # pred:[batch_size, grid_size, grid_size, anchors, (c_x, c_y, w, h, obj, classes)]
-    grid = tf.shape(pred)[1:3]     # 获得grid大小
+    grid_size = tf.shape(pred)[1:3]     # 获得grid大小
     c_xy, x_wh, obj, classs = tf.split(pred, (2, 2, 1, classes), axis=-1)   # 分开中心点x,y,宽，高，有无obj，类别
 
     # 处理一下pred数据，使之更容易收敛
@@ -110,11 +112,14 @@ def yolo_pred_to_boxes(pred, anchors, classes):     # pred:[batch_size, grid_siz
     pred_box = tf.concat([c_xy, x_wh], axis=-1)
 
     # 生成一个数组：x,y分别从0-grid[0]与0-grid[1]
-    grid = _meshgrid(grid[1], grid[0])
+    grid = _meshgrid(grid_size[1], grid_size[0])
     grid = tf.expand_dims(tf.stack(grid, axis=-1), axis=2)
 
     # 每个格子的坐标xy分别加上对应格子的下标，（从对于格子的相对坐标转化从相对于整张图片的相对坐标）
-    box_xy = (c_xy + tf.cast(grid, tf.float32)) / tf.cast(grid, tf.float32)  # 相对整张图片的相对坐标
+    box_xy = (c_xy + tf.cast(grid, tf.float32)) / tf.cast(grid_size, tf.float32)  # 相对整张图片的相对坐标
+    # box_xy = (box_xy + tf.cast(grid, tf.float32)) / \
+    #     tf.cast(grid_size, tf.float32)
+
     box_wh = tf.exp(x_wh) * anchors       # wh经过e^x处理，更容易收敛
 
     # 左上角/右下角坐标
@@ -192,7 +197,7 @@ yolo_anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
 yolo_anchor_masks = np.array([[6, 7, 8], [3, 4, 5], [0, 1, 2]])
 
 
-def YoloV3(size=None, channels=3, anchors=yolo_anchors, anchor_masks=yolo_anchor_masks, classes=80, train=False):
+def YoloV3(size=None, channels=3, anchors=yolo_anchors, anchor_masks=yolo_anchor_masks, classes=num_classes, train=False):
     x = input = Input([size, size, channels])
     x_36, x_61, x = DarkNet(name='yolo_darknet')(x)
 
@@ -212,6 +217,7 @@ def YoloV3(size=None, channels=3, anchors=yolo_anchors, anchor_masks=yolo_anchor
     boxes_1 = Lambda(lambda x:yolo_pred_to_boxes(x, anchors[anchor_masks[1]], classes), name='yolo_boxes_1')(output_1)
     boxes_2 = Lambda(lambda x:yolo_pred_to_boxes(x, anchors[anchor_masks[2]], classes), name="yolo_boxes_2")(output_2)
 
+#   boxes:[xmin, ymin, xmax, ymax], obj:（有物体的概率：确信度）, label_idx:[label_idx], num:（有效框的数量）
     output = Lambda(lambda x:yolo_nms(x, classes), name='yolo_output')((boxes_0[:3], boxes_1[:3], boxes_2[:3]))
     return Model(input, output, name='yolov3')
 

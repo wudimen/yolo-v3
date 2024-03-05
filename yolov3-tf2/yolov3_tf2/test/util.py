@@ -8,6 +8,7 @@ import matplotlib.patches as patcher
 from matplotlib.font_manager import FontProperties
 from xml.dom.minidom import parse
 import numpy as np
+import cv2
 
 import tensorflow as tf
 
@@ -54,14 +55,10 @@ def parse_xml_info_voc(label_path):
         boxs.append(box)
     return boxs
 
-
-def draw_bbox_with_float(img_path, boxs, img_size=128):
-    colors = ['blue', 'black', 'red', 'green', 'pink', 'yellow', 'orange']
-
-    img_raw = Image.open(img_path)
-    img_raw = img_raw.resize((img_size, img_size))
+# boxes:[xmin, ymin, xmax, ymax, label_text]
+def draw_bbox_with_float_and_imgdata(img_raw, img_title, boxs, img_size=128, colors=['blue', 'black', 'red', 'green', 'pink', 'yellow', 'orange']):
     plt.imshow(img_raw)
-    plt.title(img_path[max(img_path.rfind('/')+1, img_path.rfind('\\')+1):])
+    plt.title(img_title)
     ax = plt.gca()
 
     # 画框与标签
@@ -75,6 +72,29 @@ def draw_bbox_with_float(img_path, boxs, img_size=128):
 
     plt.show()
 
+
+def draw_bbox_with_float(img_path, boxes, img_size=128):
+    colors = ['blue', 'black', 'red', 'green', 'pink', 'yellow', 'orange']
+    title = img_path[max(img_path.rfind('/')+1, img_path.rfind('\\')+1):]
+
+    img_raw = Image.open(img_path)
+    img_raw = img_raw.resize((img_size, img_size))
+
+    draw_bbox_with_float_and_imgdata(img_raw, title, boxes, img_size, colors)
+
+def draw_output_img(img, outputs, class_names, img_shape=(128, 128)):
+    boxes, objs, classes, nums = outputs
+    boxes, objs, classes, nums = boxes[0], objs[0], classes[0], nums[0]
+    # img = tf.image.resize(img, img_shape)
+    wh = np.flip(img.shape[0:2])
+    print('wh=', wh)
+    for i in range(nums):
+        x1y1 = tuple((np.array(boxes[i][0:2]) * wh).astype(np.float32))
+        x2y2 = tuple((np.array(boxes[i][2:4]) * wh).astype(np.float32))
+        print(x1y1,'-', x2y2)
+        img = cv2.rectangle(img, x1y1, x2y2, (255, 0, 0), 2)
+        img = cv2.putText(img, class_names[int(classes[i])] + '--' + str(objs[i]), x1y1, cv2.FONT_HERSHEY_COMPLEX_SMALL, 1, (0, 0, 255), 2)
+    return img
 
 def draw_rect_voc(pos = 0):
     IMG_SIZE = 128
@@ -338,6 +358,65 @@ def face_mask_test2():
     dataset = files.flat_map(tf.data.TFRecordDataset)                   # 打开图片
     dataset.map(lambda x: face_mask_read_data(x))
 
+YOLOV3_LAYER_LIST = [
+    'yolo_darknet',
+    'yolo_conv_0',
+    'yolo_output_0',
+    'yolo_conv_1',
+    'yolo_output_1',
+    'yolo_conv_2',
+    'yolo_output_2',
+]
+
+
+def load_darknet_weights(model, weight_file_path):
+    wf = open(weight_file_path, 'rb')
+    major, minoe, revision, seen, _ = np.fromfile(wf, dtype=np.int32, count=5)
+
+    # YOLO 模型结果
+    layers = YOLOV3_LAYER_LIST
+
+    for layer_name in layers:
+        sub_model = model.get_layer(layer_name)
+        for i, layer in enumerate(sub_model.layers):
+            if not layer.name.startswich('conv2d'):
+                continue
+            batch_norm = None
+            if i+1 < len(sub_model.layers) and sub_model.layers[i+1].name.startswich('batch_norm'):
+                batch_norm = sub_model.layers[i+1]
+            
+            print(sub_model.name, '/', layer.name, 'bn' if batch_norm else 'bias')
+
+            filters = layer.filters
+            size = layer.kernel_size[0]
+            in_dims = layer.get_input_shape_at(0)[-1]
+
+            if batch_norm is None:
+                conv_bias = np.fromfile(wf, dtype=np.float32, count=filters)
+            else:
+                bn_weights = np.fromfile(wf, dtype=np.float32, count=4 * filter)
+                bn_weights = bn_weights.reshape((4, filters))[[1,0,2,3]]
+
+            conv_shape = (filters, in_dims, size, size)
+            conv_weight = np.fromfile(wf, dtype=np.float32, count = np.product(conv_shape))
+            conv_weight = conv_weight.reshape(conv_shape).transpose([2, 3, 1, 0])
+
+            if batch_norm is None:
+                layer.set_weights([conv_weight, conv_bias])
+            else:
+                layer.set_weights([conv_weight])
+                batch_norm.set_weights(bn_weights)
+    assert len(wf.read()) == 0, 'faild to read all data'
+    wf.close()
+
+def freeze_all(model, frozen=True):
+    model.trainable = not frozen
+    if isinstance(model, tf.keras.Model):
+        for i in model.layers:
+            freeze_all(i)
+
+
+
 yolo_anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
                          (59, 119), (116, 90), (156, 198), (373, 326)],
                         np.float32) / 416
@@ -345,9 +424,82 @@ yolo_anchor_masks = np.array([[6, 7, 8], [3, 4, 5], [0, 1, 2]])
 
 
 YOLO_MAX_BOXES = 20
-YOLO_IMG_SIZE = 128
+YOLO_IMG_SIZE = 128 * 4
 yolo_epoch = 10
-yolo_batch_size = 4
+yolo_batch_size = 16
+
+
+def transform_image(img, img_size=YOLO_IMG_SIZE):
+    img = tf.image.resize(img, (img_size, img_size))
+    img = img / 255.0
+    return img
+# tensorflow.python.framework.errors_impl.InvalidArgumentError: indices[2] = [4, 2, 1] does not index into shape [4,4,3,6]
+#          [[{{node TensorScatterUpdate}}]]
+#          [[IteratorGetNext]]
+
+
+# 每次处理一张图片的数据
+def transform_label(label):     # [[[0.065  0.70139396  0.186  1.0051358  1.  5.], [0.42225  0.06382979  0.46275  0.1298606  0.  1.], ... ]]]
+
+
+    def pre_trans_label(label, grid_size, anchor_idxs):
+        # [grid_size, grid_size, anchors_size, (xmin, ymin, xmax, ymax, obj, anchor_idx)]
+        y_true_out = tf.zeros([grid_size, grid_size, tf.shape(anchor_idxs)[0], 6])
+
+        anchor_idxs = tf.cast(anchor_idxs, tf.int32)
+
+        indexes = tf.TensorArray(tf.int32, 1, dynamic_size=True)
+        updates = tf.TensorArray(tf.float32, 1, dynamic_size=True)
+        idx = 0
+
+        # return label[0]
+
+        for j in tf.range(tf.shape(label)[0]):
+            if tf.equal(label[j][2], 0):     # 空框
+                continue
+
+            anchor_equ = tf.equal(anchor_idxs, tf.cast(label[j][5], tf.int32))        # 最合适的框是否在这一批次
+            
+            if not tf.reduce_any(anchor_equ):       # 不在这一批次
+                continue
+
+            box = label[j][0:4]
+            center_xy = (box[0:2] + box[2:4]) / 2     # 中心点xy
+            grid_xy = tf.cast(center_xy // (1./grid_size), tf.int32)                # 在哪个grid中
+            anchor_idx = tf.cast(tf.where(anchor_equ), tf.int32)                    # [0, 1, 4, 0, 0] -->  [0,1],[0,2]  哪个坐标的数值为非零（可以看最合适的框是否在这一批次中）
+
+            indexes = indexes.write(idx, [grid_xy[1], grid_xy[0], anchor_idx[0][0]])                        # 替换的坐标[第几行的grid中， 第几列的grid中， 用的第几个bound_box]
+            updates = updates.write(idx, [box[0], box[1], box[2], box[3], 1, label[j][4]])      # 替换的内容[xmin, ymin, xmax, ymax, 1, label]
+            idx += 1
+        # tf.tensor_scatter_nd_update:(稀疏矩阵表示形式)，将y_true_out的indexes位置的点用updates的内容替换
+        # [grid_size, grid_size, anchors_size, (xmin, ymin, xmax, ymax, obj, anchor_idx)]
+        # return y_true_out
+        return tf.tensor_scatter_nd_update(y_true_out, indexes.stack(), updates.stack())
+
+    grid_size = YOLO_IMG_SIZE // 32
+    y_outs = []
+
+    anchors = tf.cast(yolo_anchors, tf.float32)
+    wh = label[..., 2:4] - label[..., 0:2]                  # [[[0.12100001 0.3037418 ] [0.04049999 0.06603081], ... ]]
+    wh = tf.expand_dims(wh, -2)                             # [[ [[0.12100001 0.3037418 ]] [[0.04049999 0.06603081]], ... ]]
+    # wh = tf.tile(wh, (1, 1, 1))   # (将某一维度的数据赋值n次) 将第三维的数据复制tf.shape(anchor)[0]次
+    
+    # 查找与真实框最契合的bndbox
+    box_area = wh[..., 0] * wh[..., 1]                      # [[[0.03675276], [0.00267425] ... ]]
+    anchor_area = anchors[..., 0] * anchors[..., 1]         # [[ 0.0007512  0.00277367  0.00438586 0.01057461 0.01612195 0.04057068 0.06032729 0.17848557 0.7026512]]
+    intersection = tf.minimum(wh[..., 0], anchors[..., 0]) * tf.minimum(anchors[..., 1], wh[..., 1])
+    iou = intersection / (box_area + anchor_area - intersection)
+    anchor_idx = tf.cast(tf.argmax(iou, axis=-1), tf.float32)
+    anchor_idx = tf.expand_dims(anchor_idx, axis=-1)        # [[[5.], [1.], ... ]]
+    
+    label = tf.concat([label, anchor_idx], axis=-1)         # [[[0.065  0.70139396  0.186  1.0051358  1.  5.], [0.42225  0.06382979  0.46275  0.1298606  0.  1.], ... ]]]
+    
+    for anchor_idxs in yolo_anchor_masks:
+        y_outs.append(pre_trans_label(label, grid_size, anchor_idxs))
+        grid_size *= 2
+    return tuple(y_outs)
+
+
 
 def get_tfrecord_iterator(tfrecord_file_path, shuffle=True, epoch=yolo_epoch, batch_size=yolo_batch_size):
     def _parse_example_(example):
@@ -409,77 +561,7 @@ def get_tfrecord_iterator(tfrecord_file_path, shuffle=True, epoch=yolo_epoch, ba
         else: boxs = boxs[0:YOLO_MAX_BOXES]
         return img, boxs
 
-    def transform_image(img, img_size=YOLO_IMG_SIZE):
-        img = tf.image.resize(img, (img_size, img_size))
-        img = img / 255.0
-        return img
-# tensorflow.python.framework.errors_impl.InvalidArgumentError: indices[2] = [4, 2, 1] does not index into shape [4,4,3,6]
-#          [[{{node TensorScatterUpdate}}]]
-#          [[IteratorGetNext]]
 
-    
-    # 每次处理一张图片的数据
-    def transform_label(label):     # [[[0.065  0.70139396  0.186  1.0051358  1.  5.], [0.42225  0.06382979  0.46275  0.1298606  0.  1.], ... ]]]
-
-
-        def pre_trans_label(label, grid_size, anchor_idxs):
-            # [grid_size, grid_size, anchors_size, (xmin, ymin, xmax, ymax, obj, anchor_idx)]
-            y_true_out = tf.zeros([grid_size, grid_size, tf.shape(anchor_idxs)[0], 6])
-
-            anchor_idxs = tf.cast(anchor_idxs, tf.int32)
-
-            indexes = tf.TensorArray(tf.int32, 1, dynamic_size=True)
-            updates = tf.TensorArray(tf.float32, 1, dynamic_size=True)
-            idx = 0
-
-            # return label[0]
-
-            for j in tf.range(tf.shape(label)[0]):
-                if tf.equal(label[j][2], 0):     # 空框
-                    continue
-
-                anchor_equ = tf.equal(anchor_idxs, tf.cast(label[j][5], tf.int32))        # 最合适的框是否在这一批次
-                
-                if not tf.reduce_any(anchor_equ):       # 不在这一批次
-                    continue
-
-                box = label[j][0:4]
-                center_xy = (box[0:2] + box[2:4]) / 2     # 中心点xy
-                grid_xy = tf.cast(center_xy // (1./grid_size), tf.int32)                # 在哪个grid中
-                anchor_idx = tf.cast(tf.where(anchor_equ), tf.int32)                    # [0, 1, 4, 0, 0] -->  [0,1],[0,2]  哪个坐标的数值为非零（可以看最合适的框是否在这一批次中）
-
-                indexes = indexes.write(idx, [grid_xy[1], grid_xy[0], anchor_idx[0][0]])                        # 替换的坐标[第几行的grid中， 第几列的grid中， 用的第几个bound_box]
-                updates = updates.write(idx, [box[0], box[1], box[2], box[3], 1, label[j][4]])      # 替换的内容[xmin, ymin, xmax, ymax, 1, label]
-                idx += 1
-            # tf.tensor_scatter_nd_update:(稀疏矩阵表示形式)，将y_true_out的indexes位置的点用updates的内容替换
-            # [grid_size, grid_size, anchors_size, (xmin, ymin, xmax, ymax, obj, anchor_idx)]
-            # return y_true_out
-            return tf.tensor_scatter_nd_update(y_true_out, indexes.stack(), updates.stack())
-
-
-        grid_size = YOLO_IMG_SIZE // 32
-        y_outs = []
-
-        anchors = tf.cast(yolo_anchors, tf.float32)
-        wh = label[..., 2:4] - label[..., 0:2]                  # [[[0.12100001 0.3037418 ] [0.04049999 0.06603081], ... ]]
-        wh = tf.expand_dims(wh, -2)                             # [[ [[0.12100001 0.3037418 ]] [[0.04049999 0.06603081]], ... ]]
-        # wh = tf.tile(wh, (1, 1, 1))   # (将某一维度的数据赋值n次) 将第三维的数据复制tf.shape(anchor)[0]次
-        
-        # 查找与真实框最契合的bndbox
-        box_area = wh[..., 0] * wh[..., 1]                      # [[[0.03675276], [0.00267425] ... ]]
-        anchor_area = anchors[..., 0] * anchors[..., 1]         # [[ 0.0007512  0.00277367  0.00438586 0.01057461 0.01612195 0.04057068 0.06032729 0.17848557 0.7026512]]
-        intersection = tf.minimum(wh[..., 0], anchors[..., 0]) * tf.minimum(anchors[..., 1], wh[..., 1])
-        iou = intersection / (box_area + anchor_area - intersection)
-        anchor_idx = tf.cast(tf.argmax(iou, axis=-1), tf.float32)
-        anchor_idx = tf.expand_dims(anchor_idx, axis=-1)        # [[[5.], [1.], ... ]]
-        
-        label = tf.concat([label, anchor_idx], axis=-1)         # [[[0.065  0.70139396  0.186  1.0051358  1.  5.], [0.42225  0.06382979  0.46275  0.1298606  0.  1.], ... ]]]
-        
-        for anchor_idxs in yolo_anchor_masks:
-            y_outs.append(pre_trans_label(label, grid_size, anchor_idxs))
-            grid_size *= 2
-        return tuple(y_outs)
-    
     tf.compat.v1.disable_eager_execution()
     dataset = tf.compat.v1.data.TFRecordDataset(tfrecord_file_path)
     dataset = dataset.map(_parse_example_)
@@ -488,10 +570,10 @@ def get_tfrecord_iterator(tfrecord_file_path, shuffle=True, epoch=yolo_epoch, ba
         transform_label(y)
         # y   # 有大于1的数字，是x1,y1,x2,y2(有问题)还是x,y,w,h(可以理解)
     ))
-    dataset = dataset.shuffle(shuffle).repeat(epoch).batch(batch_size)
+    dataset = dataset.shuffle(shuffle).repeat(epoch).batch(batch_size).prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
 
-    train_iterator = dataset.make_one_shot_iterator()
-    return train_iterator
+    # train_iterator = dataset.make_one_shot_iterator()
+    # return train_iterator
     return dataset
 
 def face_mask_test_3(tfrecord_path="C:/Users/LJ/Desktop/tensorflow_code/yolo-v5/yolo-v3/yolov3-tf2/data/voc2012_val.tfrecord"):
